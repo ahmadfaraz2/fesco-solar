@@ -26,7 +26,7 @@ Managed with [**uv**](https://github.com/astral-sh/uv), `fesco-solar` features a
 - **NEPRA Regulatory Compliance:** Validates inverter capacity against the consumer's **Sanctioned Load** under NEPRA Distributed Generation Regulations (S.R.O. 892(I)/2015 & updates). Flags necessary load extensions and 3-phase prerequisites before application.
 
 ### 3. Dynamic Pricing & Turnkey BOS Cost Engine
-- **Live Market Rates (PKR/Watt):** Scrapes live per-watt market prices for Tier-1 solar modules (Longi, Jinko, JA Solar, Canadian Solar) with persistent TTL caching in `data/rates_cache.json`.
+- **Live Market Rates (PKR/Watt):** Scrapes live per-watt market prices for Tier-1 solar modules (Longi, Jinko, JA Solar, Canadian Solar, Trina, Inverex) directly from Pakistani solar market portals (`https://solarpanelsprice.pk`) with automated fallback to the Pakistan Solar Association benchmark index and 24-hour TTL caching in `data/rates_cache.json`.
 - **Complete Turnkey Balance of System (BOS):** Models total installed costs:
   - Tier-1 N-Type TOPCon / HPBC PV modules.
   - Three-phase on-grid string or hybrid inverters (1.15–1.25x DC/AC ratio).

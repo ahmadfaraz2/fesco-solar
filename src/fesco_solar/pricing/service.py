@@ -26,8 +26,8 @@ class DynamicPricingService:
 
     # Representative live sources for Pakistan solar plate market rates
     SCRAPE_URLS = [
+        "https://solarpanelsprice.pk/",
         "https://solarquote.pk/solar-panel-price-in-pakistan/",
-        "https://solarpanelsprice.pk/solar-panel-price-in-pakistan/",
     ]
 
     def __init__(self, cache_path: Optional[str] = None):
@@ -106,7 +106,7 @@ class DynamicPricingService:
 
         for url in self.SCRAPE_URLS:
             try:
-                with httpx.Client(timeout=8.0, follow_redirects=True, verify=False) as client:
+                with httpx.Client(timeout=10.0, follow_redirects=True, verify=False) as client:
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, "html.parser")
@@ -130,18 +130,113 @@ class DynamicPricingService:
     def _extract_rates_from_soup(self, soup: BeautifulSoup, source_url: str, now_str: str) -> List[SolarPlateRate]:
         """Extract brand rates from table or card structures in HTML."""
         rates: List[SolarPlateRate] = []
-        rows = soup.find_all("tr")
+        seen = set()
 
+        # 1. Parse structured tables (e.g. from solarpanelsprice.pk)
+        tables = soup.find_all("table")
+        for table in tables:
+            headers = [th.get_text(" ", strip=True).lower() for th in table.find_all("th")]
+            if not any("per watt" in h or "price/watt" in h for h in headers):
+                continue
+
+            col_module = -1
+            col_rate = -1
+            for idx, h in enumerate(headers):
+                if "per watt" in h or "price/watt" in h:
+                    col_rate = idx
+                elif "module" in h or ("panel" in h and "price" not in h and "category" not in h):
+                    col_module = idx
+
+            if col_rate == -1 or col_module == -1:
+                continue
+
+            for tr in table.find_all("tr")[1:]:
+                cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+                if len(cells) <= max(col_module, col_rate):
+                    continue
+                module_text = cells[col_module].strip()
+                rate_text = cells[col_rate].strip()
+
+                m = re.search(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*(?:PKR|Rs)?", rate_text, re.IGNORECASE)
+                if not m:
+                    continue
+                rate_val = float(m.group(1))
+                if rate_val < 20.0 or rate_val > 75.0:
+                    continue
+
+                # Brand detection
+                brand_m = re.search(
+                    r"\b(LONGi|Jinko|JA\s*Solar|JA|Canadian\s*Solar|Canadian|Trina\s*Solar|Trina|Inverex|Crown|AIKO|AstroNergy|ASTRO|Risen|Yingli|TCL)\b",
+                    module_text,
+                    re.IGNORECASE,
+                )
+                brand = brand_m.group(1).title() if brand_m else module_text.split()[0].title()
+                if brand.lower() in ("canadian", "canadian solar"):
+                    brand = "Canadian Solar"
+                elif brand.lower() in ("ja", "ja solar"):
+                    brand = "JA Solar"
+                elif brand.lower() in ("trina", "trina solar"):
+                    brand = "Trina Solar"
+                elif brand.lower() in ("astro", "astronergy"):
+                    brand = "AstroNergy"
+                elif brand.lower() == "longi":
+                    brand = "Longi Solar"
+                elif brand.lower() == "jinko":
+                    brand = "Jinko Solar"
+
+                # Wattage detection
+                watt_m = re.search(r"(\d{3})\s*W", module_text, re.IGNORECASE)
+                wattage = int(watt_m.group(1)) if watt_m else 585
+
+                # Panel type detection
+                if any(k in module_text.lower() for k in ("bi-facial", "bifacial", "dual glass", "double glass")):
+                    panel_type = "Bifacial Dual-Glass N-Type"
+                elif any(k in module_text.lower() for k in ("topcon", "n-type", "hpbc")):
+                    panel_type = "TOPCon / HPBC N-Type"
+                else:
+                    panel_type = "Mono PERC / Single Glass"
+
+                tier = (
+                    "Tier-1 Bloomberg NEF"
+                    if brand in ("Longi Solar", "Jinko Solar", "Canadian Solar", "JA Solar", "Trina Solar", "AstroNergy", "Risen")
+                    else "Grade-A Market Benchmark"
+                )
+
+                key = (brand.lower(), module_text.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                rates.append(
+                    SolarPlateRate(
+                        brand=brand,
+                        model=module_text,
+                        panel_type=panel_type,
+                        wattage=wattage,
+                        rate_per_watt_pkr=rate_val,
+                        tier=tier,
+                        source=source_url,
+                        last_updated=now_str,
+                    )
+                )
+
+        if rates:
+            return rates
+
+        # 2. Fallback row-by-row regex search for simpler tables
+        rows = soup.find_all("tr")
         for row in rows:
             text = row.get_text(" ", strip=True)
-            # Match brands e.g. Longi, Jinko, JA Solar, Canadian Solar
             brand_match = re.search(r"\b(Longi|Jinko|JA Solar|Canadian Solar|Inverex)\b", text, re.IGNORECASE)
-            # Match price per watt in PKR (typically between 25 and 45 PKR/watt in current market)
             rate_match = re.search(r"(?:Rs\.?|PKR)?\s*([2-4][0-9](?:\.[0-9]+)?)\s*(?:/|per)?\s*(?:Watt|W)", text, re.IGNORECASE)
-            
+
             if brand_match and rate_match:
                 brand = brand_match.group(1).title()
                 rate_val = float(rate_match.group(1))
+                key = (brand.lower(), rate_val)
+                if key in seen:
+                    continue
+                seen.add(key)
                 rates.append(
                     SolarPlateRate(
                         brand=brand,
