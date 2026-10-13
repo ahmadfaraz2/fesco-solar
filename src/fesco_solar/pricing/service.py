@@ -347,32 +347,53 @@ class DynamicPricingService:
         panels_cost = round(total_watts * applied_rate, 0)
 
         # 2. Inverter Cost
-        # Market benchmark: On-Grid string inverters (Huawei, Solis, Sungrow, Growatt) ~PKR 27,000/kW
-        # Hybrid inverters (Deye, Inverex) ~PKR 34,000/kW
+        # 2. Inverter Cost
+        # Market benchmark:
+        # Micro daylight inverter (e.g. Fronus PV9000, 1.2kW - 1.5kW): ~PKR 40,000
+        # Standard daylight inverter (3kW - 6kW): ~PKR 22,000/kW
+        # On-Grid string inverters (Huawei, Solis, Sungrow, Growatt) ~PKR 27,000/kW
+        # Hybrid inverters (Deye, Inverex Nitrox) ~PKR 34,000/kW
         if recommendation.system_type == SystemType.HYBRID:
             inverter_cost = round(ac_kw * 34000.0, 0)
+        elif recommendation.system_type == SystemType.DAYLIGHT:
+            if dc_kw <= 1.8:
+                inverter_cost = 40000.0  # e.g. Fronus PV9000 / PV-7200 retail price
+            else:
+                inverter_cost = round(ac_kw * 22000.0, 0)
         else:
             inverter_cost = round(ac_kw * 27000.0, 0)
 
         # 3. Mounting Structure Cost (L2/L3 Galvanized Iron)
-        # Benchmark: ~PKR 14 per watt DC (or ~PKR 8,200 per 585W panel)
-        mounting_cost = round(total_watts * 14.0, 0)
+        if recommendation.system_type == SystemType.DAYLIGHT and dc_kw <= 1.8:
+            mounting_cost = 9000.0  # 2-panel custom L2 rooftop mount
+        else:
+            mounting_cost = round(total_watts * 14.0, 0)
 
         # 4. Electrical BOS (DC cables 4/6mm², AC cables, MCCB, SPD, DB box)
-        # Scaled according to system size: base PKR 90,000 + PKR 12,000 per kW
-        electrical_bos_cost = round(90000.0 + (dc_kw * 12000.0), 0)
+        if recommendation.system_type == SystemType.DAYLIGHT and dc_kw <= 1.8:
+            electrical_bos_cost = 15000.0  # 4mm DC wiring, single breaker DB box
+        else:
+            electrical_bos_cost = round(90000.0 + (dc_kw * 12000.0), 0)
 
-        # 5. Grounding / Chemical Earthing Bore
-        # Dual chemical bore (Inverter + Lightning Arrester) with copper strip
-        grounding_cost = 75000.0 if dc_kw <= 15.0 else 105000.0
+        # 5. Grounding / Earthing
+        if recommendation.system_type == SystemType.DAYLIGHT and dc_kw <= 1.8:
+            grounding_cost = 8000.0  # Standard copper bonded earthing rod
+        else:
+            grounding_cost = 75000.0 if dc_kw <= 15.0 else 105000.0
 
         # 6. FESCO Net Metering Facilitation & Green Meter
-        # FESCO 3-phase bi-directional meter + testing lab charges + NEPRA license processing
-        net_metering_cost = 115000.0
+        # Daylight Solar-Direct systems operate behind-the-meter and require NO green meter fee!
+        if recommendation.system_type == SystemType.DAYLIGHT:
+            net_metering_cost = 0.0
+        else:
+            net_metering_cost = 115000.0
 
         # 7. Turnkey Installation, Civil Work & Commissioning Labor
-        # Benchmark: ~PKR 9.50 per watt
-        labor_cost = round(total_watts * 9.50, 0)
+        if recommendation.system_type == SystemType.DAYLIGHT and dc_kw <= 1.8:
+            labor_cost = 10000.0  # Local residential electrician install fee
+        else:
+            labor_cost = round(total_watts * 9.50, 0)
+
 
         return TurnkeyBOSCost(
             system_capacity_kw=dc_kw,

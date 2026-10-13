@@ -7,7 +7,8 @@ from typing import Optional
 from fesco_solar.models.bill import ElectricityBill
 from fesco_solar.models.financial import FinancialSummary
 from fesco_solar.models.pricing import TurnkeyBOSCost
-from fesco_solar.models.solar import SystemRecommendation
+from fesco_solar.models.solar import SystemRecommendation, SystemType
+
 
 
 class FinancialPaybackEngine:
@@ -31,30 +32,44 @@ class FinancialPaybackEngine:
         annual_grid_units = bill.total_annual_units
         annual_solar_gen = recommendation.estimated_annual_generation_kwh
 
-        import_tariff = custom_import_tariff or self.DEFAULT_GRID_IMPORT_TARIFF_PKR
+        if custom_import_tariff:
+            import_tariff = custom_import_tariff
+        elif bill.total_annual_units > 0 and sum(r.bill_amount_pkr for r in bill.history) > 0:
+            import_tariff = round(sum(r.bill_amount_pkr for r in bill.history) / bill.total_annual_units, 2)
+        else:
+            import_tariff = self.DEFAULT_GRID_IMPORT_TARIFF_PKR
+
         export_tariff = custom_export_tariff or self.DEFAULT_NEPRA_EXPORT_TARIFF_PKR
 
         # Calculate self-consumption vs export
-        # In residential Punjab homes, typical daytime self-consumption is ~42% of solar generation
-        # The remaining ~58% is exported to the grid via green bi-directional meter
-        self_consumed_units = min(annual_grid_units * 0.75, annual_solar_gen * 0.45)
-        exported_units = max(0.0, annual_solar_gen - self_consumed_units)
+        if recommendation.system_type == SystemType.DAYLIGHT:
+            # Daylight solar-direct inverter offsets daytime loads directly (65-75% of annual consumption)
+            # Surplus is not exported because no bi-directional green meter is installed
+            self_consumed_units = min(annual_grid_units * 0.70, annual_solar_gen)
+            exported_units = 0.0
+            savings_import_offset = self_consumed_units * import_tariff
+            earnings_export_credit = 0.0
+        else:
+            # In residential Punjab homes, typical daytime self-consumption is ~42% of solar generation
+            # The remaining ~58% is exported to the grid via green bi-directional meter
+            self_consumed_units = min(annual_grid_units * 0.75, annual_solar_gen * 0.45)
+            exported_units = max(0.0, annual_solar_gen - self_consumed_units)
+            # Financial savings
+            # 1. Avoided grid electricity purchases
+            savings_import_offset = self_consumed_units * import_tariff
+            # 2. Credits earned from exported solar units
+            earnings_export_credit = exported_units * export_tariff
+
+        total_annual_savings = round(savings_import_offset + earnings_export_credit, 0)
 
         # Baseline expenditure without solar
         annual_bill_before = annual_grid_units * import_tariff
 
-        # Financial savings
-        # 1. Avoided grid electricity purchases
-        savings_import_offset = self_consumed_units * import_tariff
-        # 2. Credits earned from exported solar units
-        earnings_export_credit = exported_units * export_tariff
-
-        total_annual_savings = round(savings_import_offset + earnings_export_credit, 0)
-        
         # Projected annual bill after solar (net expenditure)
         net_units_remaining = max(0.0, annual_grid_units - self_consumed_units)
         gross_grid_cost = net_units_remaining * import_tariff
         annual_bill_after = max(0.0, gross_grid_cost - earnings_export_credit)
+
 
         return FinancialSummary(
             total_capex_investment_pkr=capex,

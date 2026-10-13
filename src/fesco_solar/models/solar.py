@@ -16,6 +16,8 @@ class SystemType(str, Enum):
     ON_GRID = "On-Grid (Net Metered)"
     HYBRID = "Hybrid (Battery Backup + Net Metered)"
     OFF_GRID = "Off-Grid (Battery Only)"
+    DAYLIGHT = "Daylight Solar-Direct (Battery-Less Grid-Blending)"
+
 
 
 class SolarPanelSpec(BaseModel):

@@ -30,8 +30,9 @@ def test_turnkey_bos_calculation(tmp_path):
     cache_file = str(tmp_path / "rates_bos.json")
     service = DynamicPricingService(cache_path=cache_file)
 
-    extractor = PitcOnlineExtractor()
-    bill = extractor.extract("13131241234567U")
+    from fesco_solar.extractors.pdf_parser import PdfBillExtractor
+    extractor = PdfBillExtractor()
+    bill = extractor.extract("data/sample_fesco_bill.pdf")
     sizing = SolarSizingEngine()
     rec = sizing.size_system(bill)
 
@@ -51,8 +52,9 @@ def test_financial_payback_engine(tmp_path):
     cache_file = str(tmp_path / "rates_fin.json")
     service = DynamicPricingService(cache_path=cache_file)
 
-    extractor = PitcOnlineExtractor()
-    bill = extractor.extract("13131241234567U")
+    from fesco_solar.extractors.pdf_parser import PdfBillExtractor
+    extractor = PdfBillExtractor()
+    bill = extractor.extract("data/sample_fesco_bill.pdf")
     sizing = SolarSizingEngine()
     rec = sizing.size_system(bill)
     bos = service.calculate_turnkey_bos(rec)

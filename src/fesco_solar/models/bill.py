@@ -25,21 +25,25 @@ class TariffInfo(BaseModel):
     """Tariff and connection specifications for the consumer."""
 
     tariff_code: str = Field(default="A-1a(01)", description="Tariff category code, e.g., A-1a (Domestic), A-2a (Commercial)")
-    sanctioned_load_kw: float = Field(default=5.0, ge=0.1, description="Sanctioned load approved by FESCO in kW")
+    sanctioned_load_kw: float = Field(ge=0.1, description="Sanctioned load approved by FESCO in kW")
     meter_number: Optional[str] = Field(default=None, description="Physical electric meter number")
     feeder_name: Optional[str] = Field(default=None, description="Grid feeder name e.g. City-1, Millat Town")
     connection_date: Optional[str] = Field(default=None, description="Date of original electricity connection")
-    phase_type: str = Field(default="3-Phase", description="1-Phase or 3-Phase connection")
+    phase_type: str = Field(default="1-Phase", description="1-Phase or 3-Phase connection")
 
 
 class ConsumerDetails(BaseModel):
     """Consumer identification and location information."""
 
     reference_number: str = Field(description="14-digit FESCO reference number (may include check alphabet)")
-    consumer_name: str = Field(default="Valued Consumer", description="Registered consumer name on bill")
-    address: str = Field(default="Faisalabad Region, Punjab", description="Consumer physical premises address")
+    consumer_name: str = Field(default="N/A", description="Registered consumer name on bill")
+    address: str = Field(default="N/A", description="Consumer physical premises address")
+    consumer_id: Optional[str] = Field(default=None, description="PITC 10/11-digit Consumer ID")
     cnic: Optional[str] = Field(default=None, description="CNIC of consumer if available on bill")
     sub_division: Optional[str] = Field(default=None, description="FESCO Sub-Division office name")
+    transformer: Optional[str] = Field(default=None, description="Distribution transformer label")
+    connection_status: Optional[str] = Field(default=None, description="Connection status e.g. Replaced")
+    billing_category: Optional[str] = Field(default=None, description="Consumer category e.g. Protected / Unprotected")
 
     @field_validator("reference_number")
     @classmethod
@@ -61,6 +65,22 @@ class ElectricityBill(BaseModel):
     current_units: int = Field(ge=0, description="Current month units consumed")
     current_bill_pkr: float = Field(ge=0.0, description="Current month payable amount in PKR")
     history: List[MonthlyRecord] = Field(default_factory=list, description="Historical monthly records (up to 12 months)")
+
+    # Detailed billing meter readings and charge breakdown
+    previous_reading: Optional[int] = Field(default=None, description="Previous meter index reading")
+    present_reading: Optional[int] = Field(default=None, description="Present meter index reading")
+    electricity_charges_pkr: Optional[float] = Field(default=None, description="Total Electricity Charges")
+    subsidies_pkr: Optional[float] = Field(default=None, description="Government subsidies")
+    net_electricity_charges_pkr: Optional[float] = Field(default=None, description="Net electricity charges after subsidies")
+    taxes_pkr: Optional[float] = Field(default=None, description="Total applicable taxes")
+    fpa_pkr: Optional[float] = Field(default=None, description="Fuel Price Adjustment (FPA)")
+    current_bill_charges_pkr: Optional[float] = Field(default=None, description="Current bill charges")
+    arrears_pkr: Optional[float] = Field(default=0.0, description="Previous unpaid arrears")
+    late_surcharge_pkr: Optional[float] = Field(default=None, description="Late payment surcharge")
+    payable_after_due_date_pkr: Optional[float] = Field(default=None, description="Total payable after due date")
+    payment_date: Optional[str] = Field(default=None, description="Payment transaction date")
+    amount_paid_pkr: Optional[float] = Field(default=None, description="Amount previously paid")
+
 
     @computed_field
     @property

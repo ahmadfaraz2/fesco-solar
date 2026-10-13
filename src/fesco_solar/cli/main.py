@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 import typer
 from rich import box
@@ -11,9 +12,19 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 from fesco_solar.engine.sizing import SolarSizingEngine
+from fesco_solar.extractors.base import PdfExtractionError, PitcPortalError
 from fesco_solar.extractors.pdf_parser import PdfBillExtractor
 from fesco_solar.extractors.pitc_online import PitcOnlineExtractor
+
 from fesco_solar.models.bill import ElectricityBill
 from fesco_solar.models.solar import SystemType
 from fesco_solar.pricing.payback import FinancialPaybackEngine
@@ -37,8 +48,86 @@ def print_banner() -> None:
     console.print(Panel(banner_text, box=box.ROUNDED, border_style="yellow"))
 
 
+def display_full_bill_breakdown(bill: ElectricityBill) -> None:
+    """Print complete itemized computerized FESCO bill details."""
+    table = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
+    table.add_column("Field", style="bold cyan")
+    table.add_column("Value", style="bold white")
+    table.add_column("Field2", style="bold cyan")
+    table.add_column("Value2", style="bold white")
+
+    table.add_row(
+        "Consumer ID:", bill.consumer.consumer_id or "N/A",
+        "Reference Number:", f"[bold green]{bill.consumer.reference_number}[/bold green]"
+    )
+    table.add_row(
+        "Consumer Name:", bill.consumer.consumer_name,
+        "Sanctioned Load:", f"[bold magenta]{bill.tariff.sanctioned_load_kw} kW[/bold magenta] ({bill.tariff.phase_type})"
+    )
+    table.add_row(
+        "Premises Address:", bill.consumer.address,
+        "Tariff Category:", f"{bill.tariff.tariff_code} ({bill.consumer.billing_category or 'Domestic'})"
+    )
+    table.add_row(
+        "Sub-Division:", bill.consumer.sub_division or "N/A",
+        "Feeder Name:", bill.tariff.feeder_name or "N/A"
+    )
+    table.add_row(
+        "Distribution Transformer:", bill.consumer.transformer or "N/A",
+        "Meter Serial No:", bill.tariff.meter_number or "N/A"
+    )
+    if bill.previous_reading is not None and bill.present_reading is not None:
+        table.add_row(
+            "Meter Readings:", f"Previous: {bill.previous_reading:,} | Present: {bill.present_reading:,}",
+            "Current Units Billed:", f"[bold yellow]{bill.current_units:,} Units[/bold yellow]"
+        )
+
+    console.print(Panel(table, title="[bold green]🧾 Official FESCO Computerized Consumer & Metering Record[/bold green]", box=box.ROUNDED, border_style="green"))
+
+    # Charges Table if charges breakdown is available
+    if bill.electricity_charges_pkr is not None:
+        chg_table = Table(
+            title=f"💵 Official Bill Charges Breakdown (Billing Month: {bill.bill_month})",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+            show_footer=True,
+        )
+        chg_table.add_column("Billing Item / Head", style="bold white", footer="[bold]TOTAL PAYABLE WITHIN DUE DATE[/bold]")
+        chg_table.add_column("Amount (PKR)", justify="right", style="bold green", footer=f"[bold green]Rs {bill.current_bill_pkr:,.0f}[/bold green]")
+        chg_table.add_column("Regulatory & Accounting Notes", style="dim white")
+
+        chg_table.add_row("Total Electricity Charges", f"Rs {bill.electricity_charges_pkr:,.0f}", "Base tariff rate consumption")
+        if bill.subsidies_pkr:
+            chg_table.add_row("Government Tariff Subsidy", f"-Rs {bill.subsidies_pkr:,.0f}", "[green]Relief subsidy applied[/green]")
+        if bill.net_electricity_charges_pkr:
+            chg_table.add_row("Net Electricity Charges", f"Rs {bill.net_electricity_charges_pkr:,.0f}", "After government tariff relief")
+        if bill.taxes_pkr:
+            chg_table.add_row("Taxes & Surcharges", f"Rs {bill.taxes_pkr:,.0f}", "GST, ED, FC Surcharge, Neelum Jhelum")
+        if bill.fpa_pkr:
+            chg_table.add_row("Fuel Price Adjustment (FPA)", f"Rs {bill.fpa_pkr:,.0f}", "NEPRA monthly fuel variation charge")
+        if bill.arrears_pkr:
+            chg_table.add_row("Previous Arrears", f"Rs {bill.arrears_pkr:,.0f}", "Unpaid balance from prior invoices")
+
+        console.print(chg_table)
+
+        # Due Date & Late Payment Box
+        due_panel = Text()
+        due_panel.append(f"• Issue Date: {bill.issue_date or 'N/A'}  |  Payment Due Date: ", style="bold white")
+        due_panel.append(f"{bill.due_date or 'N/A'}\n", style="bold green")
+        due_panel.append(f"• Amount Payable Within Due Date: ", style="bold white")
+        due_panel.append(f"Rs {bill.current_bill_pkr:,.0f}\n", style="bold green")
+        if bill.late_surcharge_pkr:
+            due_panel.append(f"• Late Payment Surcharge: Rs {bill.late_surcharge_pkr:,.0f}\n", style="bold red")
+        if bill.payable_after_due_date_pkr:
+            due_panel.append(f"• Amount Payable After Due Date: Rs {bill.payable_after_due_date_pkr:,.0f}\n", style="bold red")
+        if bill.amount_paid_pkr:
+            due_panel.append(f"• Last Payment Stamp: Rs {bill.amount_paid_pkr:,.0f} paid on {bill.payment_date or 'N/A'}", style="dim cyan")
+        console.print(Panel(due_panel, title="[bold yellow]📅 Due Dates & Payment Reconciliation[/bold yellow]", box=box.ROUNDED, border_style="yellow"))
+
+
 def display_consumer_and_history(bill: ElectricityBill, is_live_verified: bool = False) -> None:
     """Display consumer details and monthly consumption breakdown table with visual bars."""
+
     # Consumer Summary Box
     info_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
     info_table.add_column("Key", style="bold cyan")
@@ -282,7 +371,13 @@ def analyze(
         "on-grid",
         "--type",
         "-t",
-        help="System architecture: 'on-grid' (net metered) or 'hybrid' (battery backup)",
+        help="System architecture: 'on-grid' (net metered), 'daylight' (battery-less daylight blending), or 'hybrid' (battery backup)",
+    ),
+    full_bill: bool = typer.Option(
+        False,
+        "--full-bill",
+        "-f",
+        help="Display complete itemized bill charges and meter readings breakdown",
     ),
     offset: float = typer.Option(
         100.0,
@@ -321,19 +416,58 @@ def analyze(
         raise typer.Exit(code=1)
 
     # 1. Extract Bill
-    with console.status("[bold cyan]Extracting bill data...", spinner="dots"):
-        if pdf:
-            console.print(f"[dim]Reading local PDF bill: [bold]{pdf}[/bold][/dim]")
-            extractor = PdfBillExtractor()
-            bill = extractor.extract(pdf)
-        else:
-            console.print(f"[dim]Querying online PITC billing portal for reference: [bold]{ref}[/bold][/dim]")
-            extractor = PitcOnlineExtractor()
-            bill = extractor.extract(ref)  # type: ignore
+    try:
+        with console.status("[bold cyan]Extracting bill data...", spinner="dots"):
+            if pdf:
+                console.print(f"[dim]Reading local PDF bill: [bold]{pdf}[/bold][/dim]")
+                extractor = PdfBillExtractor()
+                bill = extractor.extract(pdf)
+            else:
+                console.print(f"[dim]Querying online PITC billing portal for reference: [bold]{ref}[/bold][/dim]")
+                extractor = PitcOnlineExtractor()
+                bill = extractor.extract(ref)  # type: ignore
+    except PdfExtractionError as e:
+        console.print(
+            Panel(
+                f"[bold red]❌ PDF Extraction Error[/bold red]\n\n"
+                f"{e.message}\n\n"
+                f"[dim]Missing mandatory fields: [bold]{', '.join(e.missing_fields) if e.missing_fields else 'None'}[/bold][/dim]\n"
+                f"[dim]Please verify this is an authentic, computerized FESCO/PITC bill PDF,\n"
+                f"or use '--ref <14-digit reference>' to fetch directly from the online portal.[/dim]",
+                title="[bold red]Extraction Failed[/bold red]",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+    except PitcPortalError as e:
+        console.print(
+            Panel(
+                f"[bold red]❌ PITC Online Portal Error[/bold red]\n\n"
+                f"{e.message}\n\n"
+                f"[dim]Reference Number: [bold]{e.reference_number}[/bold][/dim]\n"
+                f"[dim]Please verify the 14-digit reference number matches your bill,\n"
+                f"or provide a local computerized PDF bill using '--pdf <path.pdf>'.[/dim]",
+                title="[bold red]Online Fetch Failed[/bold red]",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
+    except FileNotFoundError as e:
+        console.print(f"[bold red]❌ Error: File not found: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
 
     # 2. Size Solar System
     sizing_engine = SolarSizingEngine()
-    sys_type = SystemType.HYBRID if "hybrid" in system_type_str.lower() else SystemType.ON_GRID
+    if any(k in system_type_str.lower() for k in ["daylight", "direct", "batteryless"]):
+        sys_type = SystemType.DAYLIGHT
+    elif "hybrid" in system_type_str.lower():
+        sys_type = SystemType.HYBRID
+    else:
+        sys_type = SystemType.ON_GRID
+
     recommendation = sizing_engine.size_system(
         bill=bill,
         system_type=sys_type,
@@ -354,9 +488,53 @@ def analyze(
 
     # 5. Display Rich Results
     is_live = getattr(extractor, "last_fetch_was_live", False)
+    if full_bill or (bill.electricity_charges_pkr is not None and pdf):
+        display_full_bill_breakdown(bill)
     display_consumer_and_history(bill, is_live_verified=is_live)
     display_recommendation_and_bos(recommendation, turnkey_cost)
     display_financial_summary(financial)
+
+
+@app.command(name="bill")
+def show_bill_details(
+    ref: Optional[str] = typer.Option(
+        None,
+        "--ref",
+        "-r",
+        help="14-digit FESCO reference number (fetches online via PITC portal)",
+    ),
+    pdf: Optional[str] = typer.Option(
+        None,
+        "--pdf",
+        "-p",
+        help="Path to local FESCO bill PDF file",
+    ),
+) -> None:
+    """View complete official FESCO bill breakdown (meter readings, charges, taxes, FPA)."""
+    print_banner()
+
+    if not ref and not pdf:
+        console.print(
+            "[bold yellow]⚠️ No bill source specified![/bold yellow]\n"
+            "Please provide either [green]--pdf <path-to-bill.pdf>[/green] or [green]--ref <14-digit reference>[/green]."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        with console.status("[bold cyan]Extracting bill data...", spinner="dots"):
+            if pdf:
+                extractor = PdfBillExtractor()
+                bill = extractor.extract(pdf)
+            else:
+                extractor = PitcOnlineExtractor()
+                bill = extractor.extract(ref)  # type: ignore
+    except Exception as e:
+        console.print(f"[bold red]❌ Extraction error: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    display_full_bill_breakdown(bill)
+    display_consumer_and_history(bill)
+
 
 
 @app.command()
@@ -457,11 +635,13 @@ def quick_quote(
 
 @app.command()
 def demo() -> None:
-    """Run an end-to-end demonstration with a realistic FESCO 14-digit reference bill."""
+    """Run an end-to-end demonstration with the authentic sample FESCO bill."""
+    sample_pdf = "data/sample_fesco_bill.pdf"
     analyze(
-        ref="13131241234567U",
-        pdf=None,
+        ref=None,
+        pdf=sample_pdf,
         system_type_str="on-grid",
+        full_bill=True,
         offset=100.0,
         custom_kw=None,
         brand="Longi",

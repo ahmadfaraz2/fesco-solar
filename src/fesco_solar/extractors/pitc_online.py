@@ -7,7 +7,7 @@ from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
 
-from fesco_solar.extractors.base import BaseBillExtractor
+from fesco_solar.extractors.base import BaseBillExtractor, PitcPortalError
 from fesco_solar.models.bill import (
     ConsumerDetails,
     ElectricityBill,
@@ -35,7 +35,12 @@ class PitcOnlineExtractor(BaseBillExtractor):
         self.last_fetch_was_live: bool = False
 
     def extract(self, reference_number: str) -> ElectricityBill:
-        """Fetch online bill from PITC using 14-digit reference number."""
+        """Fetch genuine online bill from PITC using 14-digit reference number.
+
+        Raises:
+            ValueError: If reference number does not contain 14 digits.
+            PitcPortalError: If PITC portal is unreachable or reference is not found.
+        """
         clean_ref = self.clean_ref_number(reference_number)
         
         # Determine 14 digits and optional RU code (U=Urban, R=Rural)
@@ -57,9 +62,13 @@ class PitcOnlineExtractor(BaseBillExtractor):
                 self.last_fetch_was_live = True
                 return bill
 
-        # Fallback to authentic representative profile if portal is completely down
         self.last_fetch_was_live = False
-        return self._generate_representative_bill(clean_ref, digits_only)
+        raise PitcPortalError(
+            f"Could not retrieve bill for reference number '{clean_ref}'. "
+            "The PITC online portal is currently unreachable or this reference number was not found. "
+            "Please verify the 14-digit reference number, or provide a computerized PDF bill using '--pdf'.",
+            reference_number=clean_ref,
+        )
 
     def _fetch_portal_html(self, ref_14: str, ru_hint: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
         """Query PITC ASP.NET billing portal by posting reference number and RU code."""
@@ -114,162 +123,292 @@ class PitcOnlineExtractor(BaseBillExtractor):
         return None, None
 
     def _parse_html(self, html: str, ref_clean: str) -> Optional[ElectricityBill]:
-        """Parse PITC bill HTML DOM structure (both modern CSS Grid & legacy tables)."""
+        """Parse PITC bill HTML DOM structure with zero synthetic values."""
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(" ", strip=True)
 
-        # 1. Consumer Name & Address
-        name = "Valued FESCO Consumer"
-        address = "Faisalabad Region, Punjab"
+        # 1. Parse Consumer Details from consumer-detail-card
+        c_pairs: dict[str, str] = {}
+        c_card = soup.find(class_=lambda c: c and "consumer-detail-card" in c)
+        if c_card:
+            for lbl in c_card.find_all(class_="label-row"):
+                en = lbl.find(class_="en-lbl")
+                if en:
+                    v = lbl.find_next_sibling(class_=lambda c: c and "val-space" in c)
+                    c_pairs[en.get_text(strip=True).upper()] = v.get_text(" ", strip=True) if v else ""
 
-        # Check for modern PITC address element
-        addr_elem = soup.find(class_=lambda c: c and "val-space--address" in c)
-        if addr_elem:
-            full_addr_str = addr_elem.get_text(" ", strip=True)
-            # Example: "Liaquat Ali, S/O Muhammad Sharif, Chak No.24 Nb Bhalwal"
-            parts = [p.strip() for p in full_addr_str.split(",") if p.strip()]
+        # Name & Address
+        name = "N/A"
+        address = "N/A"
+        raw_name_addr = c_pairs.get("NAME & ADDRESS")
+        if raw_name_addr:
+            parts = [p.strip() for p in raw_name_addr.split(",") if p.strip()]
             if len(parts) >= 2:
                 name = parts[0]
-                if "S/O" in parts[1].upper() or "D/O" in parts[1].upper() or "W/O" in parts[1].upper():
+                if any(k in parts[1].upper() for k in ("S/O", "D/O", "W/O", "SO ", "DO ", "WO ")):
                     name = f"{parts[0]}, {parts[1]}"
                     address = ", ".join(parts[2:]) if len(parts) > 2 else "Punjab"
                 else:
                     address = ", ".join(parts[1:])
             else:
-                name = full_addr_str
-                address = "Punjab"
+                name = raw_name_addr
         else:
-            name_match = re.search(r"NAME\s*&\s*ADDRESS[^\n\r:]*[:\s]*([A-Z\s\.\/]{3,35})(?=\s*ADDRESS|\s*TRANSFORMER|\s*CNIC)", text, re.IGNORECASE)
+            name_match = re.search(r"NAME\s*&\s*ADDRESS[^\n\r:]*[:\s]*([A-Z\s\.\/]{3,40})(?=\s*ADDRESS|\s*TRANSFORMER|\s*CNIC)", text, re.IGNORECASE)
             if name_match:
                 name = name_match.group(1).strip()
 
-        # 2. Sanctioned Load
-        # In PITC: "SAN LOAD لوڈ 3" or "SANCTIONED LOAD 3.0 KW"
-        sanctioned_load = 5.0
-        load_match = re.search(r"SAN\s*LOAD[\s\u0600-\u06FF:]*([0-9]+(?:\.[0-9]+)?)", text, re.IGNORECASE)
-        if load_match:
-            try:
-                sanctioned_load = float(load_match.group(1))
-            except ValueError:
-                pass
-        else:
-            sanctioned_load = self.parse_sanctioned_load(text, default_kw=5.0)
+        consumer_id = c_pairs.get("CONSUMER ID") or None
+        transformer = c_pairs.get("TRANSFORMER") or None
+        feeder = c_pairs.get("FEEDER") or None
+        sub_division = c_pairs.get("SUB DIVISION") or None
+        category = c_pairs.get("CATEGORY") or None
+        status = c_pairs.get("STATUS") or None
 
-        # 3. Tariff Classification
-        tariff_code = "A-1A(01) Domestic"
-        tariff_match = re.search(r"\b([A-Z]\-[0-9][A-Z0-9\-\(\)]*)\b", text)
-        if tariff_match:
-            tariff_code = tariff_match.group(1).strip()
-        else:
-            cand = re.search(r"TARIFF[\s\u0600-\u06FF:]*([A-Z0-9\-\(\)]+)", text, re.IGNORECASE)
-            if cand and cand.group(1).upper() != "CATEGORY":
-                tariff_code = cand.group(1).strip()
+        if not feeder:
+            feeder_match = re.search(r"FEEDER[\s\u0600-\u06FF:]*([0-9A-Z\s\-]+?)(?=\s*SUB\s*DIVISION|\s*CATEGORY|\s*TRANSFORMER)", text, re.IGNORECASE)
+            if feeder_match:
+                feeder = feeder_match.group(1).strip()
 
-        # 4. Feeder & Sub-division
-        feeder = None
-        feeder_match = re.search(r"FEEDER[\s\u0600-\u06FF:]*([0-9A-Z\s\-]+?)(?=\s*SUB\s*DIVISION|\s*CATEGORY|\s*TRANSFORMER)", text, re.IGNORECASE)
-        if feeder_match:
-            feeder = feeder_match.group(1).strip()
+        if not sub_division:
+            sub_match = re.search(r"SUB\s*DIVISION[\s\u0600-\u06FF:]*([0-9A-Z\s\-]+?)(?=\s*CATEGORY|\s*TARIFF|\s*STATUS)", text, re.IGNORECASE)
+            if sub_match:
+                sub_division = sub_match.group(1).strip()
 
-        sub_division = None
-        sub_match = re.search(r"SUB\s*DIVISION[\s\u0600-\u06FF:]*([0-9A-Z\s\-]+?)(?=\s*CATEGORY|\s*TARIFF|\s*STATUS)", text, re.IGNORECASE)
-        if sub_match:
-            sub_division = sub_match.group(1).strip()
-
-        # 5. Meter Number & Phase Type
-        meter_no = None
-        meter_match = re.search(r"METER\s*NO[\s\u0600-\u06FF:]*([0-9A-Z\s\-]+?)(?=\s*MF|\s*PREVIOUS)", text, re.IGNORECASE)
-        if meter_match:
-            meter_no = meter_match.group(1).strip()
-        
-        phase_type = "3-Phase" if (sanctioned_load >= 5.0 or (meter_no and "3-P" in meter_no.upper())) else "1-Phase"
-
-        # 6. Current Units & Current Bill
-        current_units = 350
-        units_match = re.search(r"UNITS[\s\u0600-\u06FF:]*([0-9]+)(?=\s*BILL\s*CHARGES|\s*Total\s*Electricity)", text, re.IGNORECASE)
-        if units_match:
-            current_units = int(units_match.group(1))
-
-        current_bill = 15000.0
-        # Grand Total / Payable Within Due Date
-        grand_match = re.search(r"(?:Grand\s*Total|PAYABLE\s*WITHIN[\s\n]*DUE\s*DATE)[\s\u0600-\u06FF:]*([0-9,]+)", text, re.IGNORECASE)
-        if grand_match:
-            try:
-                current_bill = float(grand_match.group(1).replace(",", ""))
-            except ValueError:
-                pass
-        else:
-            bill_match = re.search(r"Current\s*Bill[\s\u0600-\u06FF:]*([0-9,]+)", text, re.IGNORECASE)
-            if bill_match:
+        # 2. Sanctioned Load (Strict - Zero Dummy Fallback)
+        sanctioned_load = None
+        raw_load = c_pairs.get("SAN LOAD")
+        if raw_load:
+            cand = re.search(r"([0-9]+(?:\.[0-9]+)?)", raw_load)
+            if cand:
                 try:
-                    current_bill = float(bill_match.group(1).replace(",", ""))
+                    sanctioned_load = float(cand.group(1))
                 except ValueError:
                     pass
 
-        # 7. Bill Month & Due Date
+        if sanctioned_load is None:
+            sanctioned_load = self.parse_sanctioned_load(text, default_kw=None)
+
+        if sanctioned_load is None or sanctioned_load <= 0:
+            raise PitcPortalError(
+                f"Failed to extract sanctioned load from PITC portal bill for reference '{ref_clean}'.",
+                reference_number=ref_clean,
+            )
+
+        # 3. Tariff Code
+        tariff_code = c_pairs.get("TARIFF")
+        if not tariff_code or tariff_code.upper() == "CATEGORY":
+            tariff_code = self.parse_tariff_code(text, default=None)
+
+        if not tariff_code:
+            raise PitcPortalError(
+                f"Failed to extract tariff classification code for reference '{ref_clean}'.",
+                reference_number=ref_clean,
+            )
+
+        # 4. Meter Info Card (Readings & Units)
+        meter_no = None
+        prev_reading = None
+        pres_reading = None
+        current_units = None
+
+        m_card = soup.find(class_=lambda c: c and "meter-info" in c)
+        if m_card:
+            for cell in m_card.find_all(class_="meter-info-cell"):
+                en = cell.find(class_="en-lbl")
+                v = cell.find(class_="val-space")
+                if not (en and v):
+                    continue
+                lbl_txt = en.get_text(strip=True).upper()
+                v_lines = [s.strip() for s in v.stripped_strings if s.strip()]
+                if not v_lines:
+                    continue
+                first_v = v_lines[0]
+
+                if "METER NO" in lbl_txt:
+                    meter_no = first_v
+                elif "PREVIOUS READING" in lbl_txt:
+                    try:
+                        prev_reading = int(re.sub(r"[^0-9]", "", first_v))
+                    except ValueError:
+                        pass
+                elif "PRESENT READING" in lbl_txt:
+                    try:
+                        pres_reading = int(re.sub(r"[^0-9]", "", first_v))
+                    except ValueError:
+                        pass
+                elif "UNITS" in lbl_txt and "BILL" not in lbl_txt:
+                    try:
+                        current_units = int(re.sub(r"[^0-9]", "", first_v))
+                    except ValueError:
+                        pass
+
+        phase_type = "1-Phase" if (sanctioned_load < 5.0 or (meter_no and "S-P" in meter_no.upper())) else "3-Phase"
+
+        # 5. Itemized Bill Charges Breakdown
+        charges: dict = {}
+        chg_card = soup.find(class_=lambda c: c and "charges-breakdown-card" in c)
+        if chg_card:
+            for row in chg_card.find_all(class_="charges-bd-row"):
+                lbl_el = row.find(class_="charges-bd-en")
+                val_el = row.find(class_="charges-bd-val")
+                if not (lbl_el and val_el):
+                    continue
+                l_text = lbl_el.get_text(" ", strip=True).upper()
+                v_text = val_el.get_text(strip=True).replace(",", "")
+                try:
+                    num = float(re.sub(r"[^0-9\.]", "", v_text))
+                except ValueError:
+                    continue
+
+                if "TOTAL ELECTRICITY CHARGES" in l_text:
+                    charges["electricity_charges"] = num
+                elif "SUBSIDIES" in l_text:
+                    charges["subsidies"] = num
+                elif "NET ELECTRICITY CHARGES" in l_text:
+                    charges["net_charges"] = num
+                elif "TAXES" in l_text:
+                    charges["taxes"] = num
+                elif "CURRENT BILL" in l_text:
+                    charges["current_bill_charges"] = num
+                elif "TOTAL FPA" in l_text:
+                    charges["fpa"] = num
+                elif "ARREARS" in l_text:
+                    charges["arrears"] = num
+                elif "GRAND TOTAL" in l_text:
+                    charges["grand_total"] = num
+
+        # 6. Right Sidebar: Bill Month, Due Dates, and Payment Info
         bill_month = "CURRENT"
-        month_match = re.search(r"BILL\s*MONTH[\s\u0600-\u06FF:]*([A-Z]{3}[\s\-]*[0-9]{2,4})", text, re.IGNORECASE)
-        if month_match:
-            bill_month = month_match.group(1).strip()
-
+        issue_date = None
         due_date = None
-        due_match = re.search(r"DUE\s*DATE[\s\u0600-\u06FF:]*([0-9]{2}[\s\-]*[A-Z]{3}[\s\-]*[0-9]{2,4})", text, re.IGNORECASE)
-        if due_match:
-            due_date = due_match.group(1).strip()
+        late_surcharge = None
+        payable_after_due_date = None
+        amount_paid = None
+        payment_date = None
 
-        # 8. Parse 12-Month Billing History
+        sb = soup.find(class_=lambda c: c and "right-sidebar" in c)
+        if sb:
+            bm_el = sb.find(class_="right-main-val")
+            if bm_el:
+                bill_month = bm_el.get_text(strip=True)
+            due_el = sb.find(class_="right-main-val--due")
+            if due_el:
+                due_date = due_el.get_text(strip=True)
+            for d_cell in sb.find_all(class_="right-grid-cell"):
+                en_txt = d_cell.get_text(" ", strip=True).upper()
+                d_val = d_cell.find(class_="right-panel-date-val")
+                if d_val and "ISSUE DATE" in en_txt:
+                    issue_date = d_val.get_text(strip=True)
+
+            sur_el = sb.find(class_="lp-surcharge-top-val")
+            if sur_el:
+                try:
+                    late_surcharge = float(re.sub(r"[^0-9\.]", "", sur_el.get_text(strip=True)))
+                except ValueError:
+                    pass
+
+            after_el = sb.find(class_="lp-surcharge-bottom-val")
+            if after_el:
+                try:
+                    payable_after_due_date = float(re.sub(r"[^0-9\.]", "", after_el.get_text(strip=True)))
+                except ValueError:
+                    pass
+
+            paid_rows = sb.find_all(class_="payable-card-paid-row")
+            for pr in paid_rows:
+                lbl_t = pr.get_text(" ", strip=True).upper()
+                val_t = pr.find(class_="payable-card-paid-val")
+                if val_t:
+                    if "AMOUNT PAID" in lbl_t:
+                        try:
+                            amount_paid = float(re.sub(r"[^0-9\.]", "", val_t.get_text(strip=True)))
+                        except ValueError:
+                            pass
+                    elif "PAYMENT DATE" in lbl_t:
+                        payment_date = val_t.get_text(strip=True)
+
+        current_bill_pkr = charges.get("grand_total")
+        if current_bill_pkr is None:
+            if charges.get("current_bill_charges") is not None:
+                current_bill_pkr = charges["current_bill_charges"]
+
+        # 7. Parse 12-Month Billing History with Status (e.g. DF) Support
         history: List[MonthlyRecord] = []
-
-        # Check for modern PITC history rows: div.history-row
         history_rows = soup.find_all(class_=lambda c: c and "history-row" in c)
         for h_row in history_rows:
-            cells = [c.get_text(strip=True) for c in h_row.find_all(class_=lambda c: c and "history-cell" in c)]
-            # Filter non-empty cells
-            cells = [c for c in cells if c]
+            cells = [c.get_text(strip=True) for c in h_row.find_all(class_="history-cell") if c.get_text(strip=True)]
             if len(cells) >= 3:
                 m_cand = cells[0]
                 if any(m in m_cand.lower() for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
-                    try:
-                        u_val = int(re.sub(r"[^0-9]", "", cells[1]))
-                        amt_val = float(re.sub(r"[^0-9\.]", "", cells[2]))
-                        history.append(MonthlyRecord(
-                            month_name=m_cand.upper(),
-                            units_consumed=u_val,
-                            bill_amount_pkr=amt_val,
-                            payment_status="PAID" if len(cells) > 3 and float(re.sub(r"[^0-9\.]", "", cells[3]) or "0") > 0 else "PAID",
-                        ))
-                    except (ValueError, IndexError):
-                        continue
+                    # Handle optional status column (e.g. 'Aug26', 'DF', '244', '10937')
+                    has_status = not cells[1].isdigit()
+                    status_val = cells[1] if has_status else "PAID"
+                    u_idx = 2 if has_status else 1
+                    amt_idx = 3 if has_status else 2
 
-        # If history rows not found, parse tables
+                    if len(cells) > amt_idx:
+                        try:
+                            u_val = int(re.sub(r"[^0-9]", "", cells[u_idx]))
+                            amt_val = float(re.sub(r"[^0-9\.]", "", cells[amt_idx]))
+                            history.append(
+                                MonthlyRecord(
+                                    month_name=m_cand.upper(),
+                                    units_consumed=u_val,
+                                    bill_amount_pkr=amt_val,
+                                    payment_status=status_val,
+                                )
+                            )
+                        except (ValueError, IndexError):
+                            continue
+
         if not history:
+            # Fallback to tables if history-row not present
             tables = soup.find_all("table")
             for table in tables:
                 rows = table.find_all("tr")
                 for row in rows:
-                    cols = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                    cols = [td.get_text(strip=True) for td in row.find_all(["td", "th"]) if td.get_text(strip=True)]
                     if len(cols) >= 3:
                         m_match = re.search(r"^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z0-9\-\s]*$", cols[0], re.IGNORECASE)
                         if m_match:
-                            u_str = re.sub(r"[^0-9]", "", cols[1])
-                            amt_str = re.sub(r"[^0-9\.]", "", cols[2]) if len(cols) > 2 else "0"
-                            if u_str:
-                                u_val = int(u_str)
-                                amt_val = float(amt_str) if amt_str else u_val * 48.0
-                                history.append(MonthlyRecord(
-                                    month_name=cols[0].upper(),
-                                    units_consumed=u_val,
-                                    bill_amount_pkr=amt_val,
-                                ))
+                            has_stat = not cols[1].isdigit()
+                            u_idx = 2 if has_stat else 1
+                            amt_idx = 3 if has_stat else 2
+                            if len(cols) > amt_idx:
+                                try:
+                                    u_val = int(re.sub(r"[^0-9]", "", cols[u_idx]))
+                                    amt_val = float(re.sub(r"[^0-9\.]", "", cols[amt_idx]))
+                                    history.append(
+                                        MonthlyRecord(
+                                            month_name=cols[0].upper(),
+                                            units_consumed=u_val,
+                                            bill_amount_pkr=amt_val,
+                                            payment_status=cols[1] if has_stat else "PAID",
+                                        )
+                                    )
+                                except (ValueError, IndexError):
+                                    continue
 
         if not history:
-            return None
+            raise PitcPortalError(
+                f"No monthly billing history found on PITC portal for reference '{ref_clean}'.",
+                reference_number=ref_clean,
+            )
+
+        if current_units is None:
+            current_units = history[-1].units_consumed if history else 0
+        if current_bill_pkr is None:
+            current_bill_pkr = history[-1].bill_amount_pkr if history else 0.0
 
         consumer = ConsumerDetails(
             reference_number=ref_clean,
             consumer_name=name,
             address=address,
-            sub_division=sub_division or "FESCO Local Sub-Division",
+            consumer_id=consumer_id,
+            sub_division=sub_division,
+            transformer=transformer,
+            connection_status=status,
+            billing_category=category,
         )
         tariff = TariffInfo(
             tariff_code=tariff_code,
@@ -283,10 +422,24 @@ class PitcOnlineExtractor(BaseBillExtractor):
             consumer=consumer,
             tariff=tariff,
             bill_month=bill_month,
+            issue_date=issue_date,
             due_date=due_date,
             current_units=current_units,
-            current_bill_pkr=current_bill,
+            current_bill_pkr=current_bill_pkr,
             history=history,
+            previous_reading=prev_reading,
+            present_reading=pres_reading,
+            electricity_charges_pkr=charges.get("electricity_charges"),
+            subsidies_pkr=charges.get("subsidies"),
+            net_electricity_charges_pkr=charges.get("net_charges"),
+            taxes_pkr=charges.get("taxes"),
+            fpa_pkr=charges.get("fpa"),
+            current_bill_charges_pkr=charges.get("current_bill_charges"),
+            arrears_pkr=charges.get("arrears", 0.0),
+            late_surcharge_pkr=late_surcharge,
+            payable_after_due_date_pkr=payable_after_due_date,
+            amount_paid_pkr=amount_paid,
+            payment_date=payment_date,
         )
 
     def _generate_representative_bill(self, clean_ref: str, digits: str) -> ElectricityBill:

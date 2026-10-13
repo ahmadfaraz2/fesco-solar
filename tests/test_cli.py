@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import pytest
 from typer.testing import CliRunner
 from fesco_solar.cli.main import app
 
@@ -35,12 +37,24 @@ def test_cli_quick_quote():
 
 
 def test_cli_analyze_online_ref():
-    """Test 'analyze' with 14-digit reference number."""
-    result = runner.invoke(app, ["analyze", "--ref", "13131241234567U"])
-    assert result.exit_code == 0
-    assert "13131241234567U" in result.output
-    assert "Turnkey Balance of System" in result.output
-    assert "Simple Payback" in result.output
+    """Test 'analyze' with online reference if TEST_FESCO_REF is provided in environment."""
+    test_ref = os.environ.get("TEST_FESCO_REF")
+    if not test_ref:
+        pytest.skip("TEST_FESCO_REF not configured (protects personal data)")
+    result = runner.invoke(app, ["analyze", "--ref", test_ref])
+    if result.exit_code == 0:
+        assert test_ref[:6] in result.output
+        assert "Turnkey Balance of System" in result.output
+        assert "Simple Payback" in result.output
+    else:
+        assert "Online Portal Error" in result.output
+
+
+def test_cli_analyze_fake_ref_fails():
+    """Test 'analyze' with non-existent reference fails with exit code 1 (no dummy data fallback)."""
+    result = runner.invoke(app, ["analyze", "--ref", "99999999999999"])
+    assert result.exit_code == 1
+    assert "Online Portal Error" in result.output
 
 
 def test_cli_demo():
@@ -48,3 +62,40 @@ def test_cli_demo():
     result = runner.invoke(app, ["demo"])
     assert result.exit_code == 0
     assert "FESCO-SOLAR" in result.output
+
+
+def test_cli_analyze_pdf():
+    """Test 'analyze' with local PDF bill."""
+    result = runner.invoke(app, ["analyze", "--pdf", "data/sample_fesco_bill.pdf"])
+    assert result.exit_code == 0
+    assert "1313124" in result.output
+    assert "HAJI ABDUL" in result.output
+    assert "7.0 kW" in result.output
+    assert "Turnkey Balance of System" in result.output
+
+
+
+
+def test_cli_analyze_pdf_missing_file():
+    """Test 'analyze' with non-existent PDF file reports clear error."""
+    result = runner.invoke(app, ["analyze", "--pdf", "non_existent.pdf"])
+    assert result.exit_code == 1
+    assert "Error: File not found" in result.output
+
+
+def test_cli_bill_command():
+    """Test 'bill' command outputs itemized billing details."""
+    result = runner.invoke(app, ["bill", "--pdf", "data/sample_fesco_bill.pdf"])
+    assert result.exit_code == 0
+    assert "Official FESCO Computerized" in result.output
+    assert "1313124" in result.output
+
+
+def test_cli_analyze_daylight():
+    """Test 'analyze' with --type daylight battery-less architecture."""
+    result = runner.invoke(app, ["analyze", "--pdf", "data/sample_fesco_bill.pdf", "--type", "daylight"])
+    assert result.exit_code == 0
+    assert "Solar-Direct" in result.output
+    assert "Turnkey Balance of System" in result.output
+
+

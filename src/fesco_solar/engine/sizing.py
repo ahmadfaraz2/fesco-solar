@@ -62,7 +62,11 @@ class SolarSizingEngine:
             if seasonal_swing >= 2.2:
                 base_kw_needed *= 1.05
             
-            target_dc_kw = max(3.0, base_kw_needed)
+            if system_type == SystemType.DAYLIGHT:
+                # In daylight setups, can be sized for micro systems down to 2 panels (~1.17 kWp)
+                target_dc_kw = max(1.17, base_kw_needed)
+            else:
+                target_dc_kw = max(3.0, base_kw_needed)
 
         # 3. Panel Count and Realized DC Capacity
         panel_wattage_kw = panel.wattage_wp / 1000.0
@@ -72,46 +76,75 @@ class SolarSizingEngine:
         realized_dc_kw = round(panel_count * panel_wattage_kw, 2)
 
         # 4. Inverter Sizing (Standard DC/AC oversizing ~1.15 to 1.25)
-        # Commercial inverter standard sizes: 3, 5, 8, 10, 12, 15, 20, 25, 30, 50 kW
-        standard_inverters = [3.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 17.0, 20.0, 25.0, 30.0, 40.0, 50.0]
+        if system_type == SystemType.DAYLIGHT:
+            standard_inverters = [1.2, 1.5, 2.0, 2.5, 3.0, 3.2, 4.0, 5.0, 6.0]
+        else:
+            standard_inverters = [3.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 17.0, 20.0, 25.0, 30.0, 40.0, 50.0]
+
         optimal_ac_kw = realized_dc_kw / 1.20  # target 1.20 DC/AC ratio
         inverter_kw = min((inv for inv in standard_inverters if inv >= optimal_ac_kw), default=standard_inverters[-1])
 
         # Inverter description
         if system_type == SystemType.HYBRID:
             inv_model = f"{inverter_kw}kW Hybrid Smart Inverter (High-Voltage Battery Ready)"
+        elif system_type == SystemType.DAYLIGHT:
+            if inverter_kw <= 1.5:
+                inv_model = f"{inverter_kw}kW Micro Solar-Direct Inverter (Fronus PV9000 / Inverex - Work-Without-Battery)"
+            else:
+                inv_model = f"{inverter_kw}kW Single-Phase Solar-Direct Inverter (Work-Without-Battery, Grid-Blending)"
         else:
             inv_model = f"{inverter_kw}kW Three-Phase On-Grid String Inverter (Dual MPPT, IP65)"
 
-        # 5. Sanctioned Load and NEPRA Net Metering Verification
-        # NEPRA Net Metering Regulations: Installed capacity cannot exceed 100% of sanctioned load.
+
+        # 5. Sanctioned Load and Regulatory Compliance
         load_expansion_needed = False
         required_load_extension_kw = 0.0
         compliance_notes = []
 
-        if inverter_kw > sanctioned_load:
-            load_expansion_needed = True
-            required_load_extension_kw = round(inverter_kw - sanctioned_load, 1)
+        if system_type == SystemType.DAYLIGHT:
+            net_metering_eligible = False
             compliance_notes.append(
-                f"[WARNING] Inverter capacity ({inverter_kw} kW) exceeds consumer's sanctioned load ({sanctioned_load} kW). "
-                f"FESCO regulations require an extension of sanctioned load by at least {required_load_extension_kw} kW before applying for Net Metering."
+                f"[DAYLIGHT BATTERY-LESS] Solar-Direct Inverter operates behind-the-meter on Single-Phase AC with automatic grid blending. "
+                "Generates pure sine wave AC directly from sunlight during the day without requiring any battery bank."
             )
+            compliance_notes.append(
+                "[NO GREEN METER NEEDED] Does not require 3-Phase meter conversion, FESCO net-metering approvals, or WAPDA green meter fees."
+            )
+            if inverter_kw > sanctioned_load:
+                compliance_notes.append(
+                    f"[SAFE RESIDENTIAL OPERATION] Inverter capacity ({inverter_kw} kW) exceeds sanctioned load ({sanctioned_load} kW). "
+                    "Inverter limits import from grid and prioritizes free solar generation during daylight hours."
+                )
+            else:
+                compliance_notes.append(
+                    f"[COMPLIANT] System capacity ({inverter_kw} kW) is within existing FESCO sanctioned load ({sanctioned_load} kW)."
+                )
         else:
-            compliance_notes.append(
-                f"[COMPLIANT] System size ({inverter_kw} kW) is within FESCO sanctioned load ({sanctioned_load} kW)."
-            )
+            # NEPRA Net Metering Regulations: Installed capacity cannot exceed 100% of sanctioned load.
+            if inverter_kw > sanctioned_load:
+                load_expansion_needed = True
+                required_load_extension_kw = round(inverter_kw - sanctioned_load, 1)
+                compliance_notes.append(
+                    f"[WARNING] Inverter capacity ({inverter_kw} kW) exceeds consumer's sanctioned load ({sanctioned_load} kW). "
+                    f"FESCO regulations require an extension of sanctioned load by at least {required_load_extension_kw} kW before applying for Net Metering."
+                )
+            else:
+                compliance_notes.append(
+                    f"[COMPLIANT] System size ({inverter_kw} kW) is within FESCO sanctioned load ({sanctioned_load} kW)."
+                )
 
-        # Net metering 3-phase eligibility check
-        is_three_phase = "3" in bill.tariff.phase_type or sanctioned_load >= 5.0
-        net_metering_eligible = True
-        if not is_three_phase:
-            compliance_notes.append(
-                "[NOTICE] Net Metering requires a 3-Phase connection. Single-phase meters must be converted to 3-Phase prior to green meter installation."
-            )
-        if realized_dc_kw < 5.0:
-            compliance_notes.append(
-                "[INFO] NEPRA typically recommends net-metered installations to be 5 kW and above for commercial feasibility."
-            )
+            # Net metering 3-phase eligibility check
+            is_three_phase = "3" in bill.tariff.phase_type or sanctioned_load >= 5.0
+            net_metering_eligible = True
+            if not is_three_phase:
+                compliance_notes.append(
+                    "[NOTICE] Net Metering requires a 3-Phase connection. Single-phase meters must be converted to 3-Phase prior to green meter installation."
+                )
+            if realized_dc_kw < 5.0:
+                compliance_notes.append(
+                    "[INFO] NEPRA typically recommends net-metered installations to be 5 kW and above for commercial feasibility."
+                )
+
 
         # 6. Monthly Generation Calculations in Punjab
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
