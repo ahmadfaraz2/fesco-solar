@@ -1,0 +1,48 @@
+{
+  "updated_at": "2026-10-13T15:00:00+00:00",
+  "ttl_seconds": 86400,
+  "is_live_scraped": true,
+  "source_url": "https://solarquote.pk/solar-panel-price-in-pakistan/",
+  "rates": [
+    {
+      "brand": "Longi Solar",
+      "model": "Hi-MO 6 Explorer LR5-72HTH 585W",
+      "panel_type": "HPBC Single Glass Mono-Facial",
+      "wattage": 585,
+      "rate_per_watt_pkr": 29.50,
+      "tier": "Tier-1 Bloomberg NEF",
+      "source": "https://solarquote.pk/solar-panel-price-in-pakistan/",
+      "last_updated": "2026-10-13T15:00:00+00:00"
+    },
+    {
+      "brand": "Jinko Solar",
+      "model": "Tiger Neo N-Type 72HL4-BDV 585W",
+      "panel_type": "TOPCon Dual-Glass Bifacial",
+      "wattage": 585,
+      "rate_per_watt_pkr": 30.00,
+      "tier": "Tier-1 Bloomberg NEF",
+      "source": "https://solarquote.pk/solar-panel-price-in-pakistan/",
+      "last_updated": "2026-10-13T15:00:00+00:00"
+    },
+    {
+      "brand": "JA Solar",
+      "model": "DeepBlue 4.0 Pro JAM72D40 580W",
+      "panel_type": "Bycium+ N-Type Bifacial",
+      "wattage": 580,
+      "rate_per_watt_pkr": 28.75,
+      "tier": "Tier-1 Bloomberg NEF",
+      "source": "https://solarquote.pk/solar-panel-price-in-pakistan/",
+      "last_updated": "2026-10-13T15:00:00+00:00"
+    },
+    {
+      "brand": "Canadian Solar",
+      "model": "TOPHiKu6 CS6W-585T 585W",
+      "panel_type": "N-Type TOPCon Mono",
+      "wattage": 585,
+      "rate_per_watt_pkr": 31.20,
+      "tier": "Tier-1 Bloomberg NEF",
+      "source": "https://solarquote.pk/solar-panel-price-in-pakistan/",
+      "last_updated": "2026-10-13T15:00:00+00:00"
+    }
+  ]
+}
