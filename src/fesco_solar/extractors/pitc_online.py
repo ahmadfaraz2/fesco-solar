@@ -43,7 +43,7 @@ class PitcOnlineExtractor(BaseBillExtractor):
         if len(digits_only) < 14:
             raise ValueError(
                 f"Invalid FESCO Reference Number '{reference_number}'. "
-                "Must be a 14-digit number (e.g. '14 13435 2211500 R' or '14134352211500')."
+                "Must be a 14-digit number (e.g. '14 12345 6789012 U' or '14123456789012')."
             )
 
         ref_14 = digits_only[:14]

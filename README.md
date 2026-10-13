@@ -47,9 +47,9 @@ uv sync
 ### 1. Analyze an Online Bill (via 14-digit Reference Number)
 Fetch live data directly from the PITC portal:
 ```bash
-uv run fesco-solar analyze --ref 14134352211500
+uv run fesco-solar analyze --ref 14123456789012
 ```
-*(Optionally append the RU code if known, e.g. `14134352211500R`).*
+*(Optionally append the RU code if known, e.g. `14123456789012R`).*
 
 ### 2. Analyze a Local PDF Bill
 ```bash
@@ -58,12 +58,12 @@ uv run fesco-solar analyze --pdf data/sample_fesco_bill.pdf
 
 ### 3. Sizing for Hybrid Inverter (with Battery Backup)
 ```bash
-uv run fesco-solar analyze --ref 14134352211500 --type hybrid
+uv run fesco-solar analyze --ref 14123456789012 --type hybrid
 ```
 
 ### 4. Custom Capacity Override (Manual kW)
 ```bash
-uv run fesco-solar analyze --ref 14134352211500 --kw 10.0
+uv run fesco-solar analyze --ref 14123456789012 --kw 10.0
 ```
 
 ### 5. Check Live Solar Plate Rates in Pakistan
