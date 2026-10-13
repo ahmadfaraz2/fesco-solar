@@ -31,10 +31,25 @@ class PdfBillExtractor(BaseBillExtractor):
         return self._parse_content(extracted_text, extracted_tables, pdf_path)
 
     def _read_pdf(self, pdf_path: str) -> tuple[str, list]:
-        """Read text and tables from PDF via pdfplumber or fallback."""
+        """Read text and tables from PDF via pypdf, pdfplumber, or stream fallback."""
         full_text = ""
         all_tables = []
-        
+
+        # 1. Primary: pypdf (pure Python, zero binary dependencies, handles compressed streams)
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(pdf_path)
+            for page in reader.pages:
+                t = page.extract_text() or ""
+                full_text += t + "\n"
+            if full_text.strip():
+                return full_text, all_tables
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # 2. Secondary: pdfplumber (table layout extraction if installed)
         try:
             import pdfplumber
 
@@ -44,17 +59,17 @@ class PdfBillExtractor(BaseBillExtractor):
                     full_text += text + "\n"
                     tables = page.extract_tables() or []
                     all_tables.extend(tables)
-            return full_text, all_tables
+            if full_text.strip():
+                return full_text, all_tables
         except ImportError:
             pass
-        except Exception as e:
+        except Exception:
             pass
 
-        # Pure python / binary stream search fallback if pdfplumber is not yet loaded
+        # 3. Pure python / binary stream search fallback for uncompressed PDF streams
         try:
             with open(pdf_path, "rb") as f:
                 raw_bytes = f.read()
-                # Attempt to extract ASCII/UTF-8 strings from uncompressed PDF streams
                 decoded = re.findall(b"[ -~]{4,}", raw_bytes)
                 full_text = " ".join(s.decode("latin1", errors="ignore") for s in decoded)
         except Exception:
@@ -64,13 +79,13 @@ class PdfBillExtractor(BaseBillExtractor):
 
     def _parse_content(self, text: str, tables: list, file_path: str) -> ElectricityBill:
         """Parse bill details from extracted text and tabular structures."""
-        # Reference number
+        # Reference number (14 digits)
         ref_match = re.search(r"\b([0-9]{2}\s*[0-9]{5}\s*[0-9]{7}\s*[A-Z]?)\b", text)
         ref_no = self.clean_ref_number(ref_match.group(1)) if ref_match else "13131241234567U"
 
         # Consumer Name
         consumer_name = "FESCO Consumer"
-        name_match = re.search(r"NAME\s*[:\s]*([A-Z\s\.\/]{3,35})(?=\s*ADDRESS|\s*CNIC|\s*TARIFF)", text, re.IGNORECASE)
+        name_match = re.search(r"NAME\s*[:\s]*([A-Z\s\.\/]{3,35})(?=\s*ADDRESS|\s*CNIC|\s*TARIFF|\n)", text, re.IGNORECASE)
         if name_match:
             candidate = name_match.group(1).strip()
             if len(candidate) > 3 and "BILL" not in candidate:
@@ -78,7 +93,7 @@ class PdfBillExtractor(BaseBillExtractor):
 
         # Address
         address = "Faisalabad, Punjab"
-        addr_match = re.search(r"ADDRESS\s*[:\s]*([A-Z0-9\s,\-\#\/]{5,60})", text, re.IGNORECASE)
+        addr_match = re.search(r"ADDRESS\s*[:\s]*([A-Z0-9\s,\-\#\/]{5,60})(?=\s*REFERENCE|\s*TARIFF|\s*CNIC|\n)", text, re.IGNORECASE)
         if addr_match:
             address = addr_match.group(1).strip()
 
@@ -91,25 +106,43 @@ class PdfBillExtractor(BaseBillExtractor):
         # History records
         history: List[MonthlyRecord] = []
 
-        # 1. Try from parsed tables
-        for tbl in tables:
-            for row in tbl:
-                if not row or len(row) < 2:
-                    continue
-                row_str = " ".join(str(c) for c in row if c)
-                m = re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z0-9\-\s]*", row_str, re.IGNORECASE)
-                if m:
-                    numbers = re.findall(r"\b\d+\b", row_str)
-                    if numbers:
-                        u_val = int(numbers[0])
-                        amt_val = float(numbers[1]) if len(numbers) > 1 else u_val * 50.0
-                        history.append(MonthlyRecord(
-                            month_name=m.group(0).strip().upper(),
-                            units_consumed=u_val,
-                            bill_amount_pkr=amt_val,
-                        ))
+        # 1. Try line-by-line scan for monthly history lines
+        for line in text.split("\n"):
+            m = re.match(
+                r"^\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[\-\s]*([0-9]{2,4})?\s+([0-9]{1,5})\s+([0-9,]+(?:\.[0-9]+)?)",
+                line.strip(),
+                re.IGNORECASE,
+            )
+            if m:
+                m_str = m.group(1).upper() + (f"-{m.group(2)}" if m.group(2) else "")
+                u_val = int(m.group(3))
+                amt_val = float(m.group(4).replace(",", ""))
+                history.append(MonthlyRecord(
+                    month_name=m_str,
+                    units_consumed=u_val,
+                    bill_amount_pkr=amt_val,
+                ))
 
-        # 2. Try regex scan from raw text if table parsing did not yield enough months
+        # 2. Try from parsed tables if available
+        if len(history) < 3 and tables:
+            for tbl in tables:
+                for row in tbl:
+                    if not row or len(row) < 2:
+                        continue
+                    row_str = " ".join(str(c) for c in row if c)
+                    m = re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z0-9\-\s]*", row_str, re.IGNORECASE)
+                    if m:
+                        numbers = re.findall(r"\b\d+\b", row_str)
+                        if numbers:
+                            u_val = int(numbers[0])
+                            amt_val = float(numbers[1]) if len(numbers) > 1 else u_val * 50.0
+                            history.append(MonthlyRecord(
+                                month_name=m.group(0).strip().upper(),
+                                units_consumed=u_val,
+                                bill_amount_pkr=amt_val,
+                            ))
+
+        # 3. Fallback regex scan across continuous text
         if len(history) < 3:
             month_patterns = re.finditer(
                 r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[\-\s]*([0-9]{2,4})?\s+([0-9]{1,5})\s+([0-9,]+(?:\.[0-9]+)?)?",
@@ -126,7 +159,7 @@ class PdfBillExtractor(BaseBillExtractor):
                     bill_amount_pkr=amt_val,
                 ))
 
-        # 3. If history could not be parsed from PDF streams, synthesize realistic 12 months based on extracted or default load
+        # 4. If history could not be parsed from PDF streams (e.g. scanned image PDF without OCR), synthesize realistic 12 months based on extracted or default load
         if len(history) < 6:
             base_u = int(sanctioned_load * 110)
             months = ["OCT-25", "NOV-25", "DEC-25", "JAN-26", "FEB-26", "MAR-26", "APR-26", "MAY-26", "JUN-26", "JUL-26", "AUG-26", "SEP-26"]
